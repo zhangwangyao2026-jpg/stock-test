@@ -2,79 +2,116 @@ import os
 import time
 import requests
 import datetime
+import pandas as pd
 from fugle_marketdata import RestClient
 
-# --- 設定區 ---
-STOCK_SYMBOL = "2330"    
-TARGET_PRICE = 1950.0    # 💡 測試建議：先設一個比現價高的數字，確保它會觸發警報
-STOP_TIME = "13:35"      
-CHECK_INTERVAL = 10      
+# --- 核心策略設定 ---
+# 填入您的觀察名單 (建議先放核心持股，名單太長建議分批)
+WATCH_LIST = [
+    "2330", "2317", "2454", "2303", "2308", "0050", "1519", "3017", 
+    "2382", "3665", "2618", "2603", "3711", "3037", "2313", "1503"
+]
 
-# --- 讀取環境變數 ---
+TRAILING_STOP_PERCENT = 0.10  # 移動止盈：從最高點回落 10% 警示
+MA_SUPPORT_GAP = 0.02         # 均線支撐：靠近季線 2% 以內警示
+CHECK_INTERVAL = 60           # 多檔監控建議每 60 秒輪詢一次，避免觸發 API 限制
+
+# --- 安全讀取環境變數 ---
 FUGLE_API_KEY = os.getenv("FUGLE_API_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def send_telegram_msg(message):
-    """傳送訊息並印出除錯資訊"""
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print("❌ 錯誤：找不到 Telegram Secrets 設定。")
-        return
+# 記憶體：紀錄每檔股票的「近期最高價」與「MA60」
+price_memory = {} # 格式: {"2330": {"high": 1000.0, "ma60": 950.0}}
 
+def send_telegram_msg(message):
+    if not TG_TOKEN or not TG_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": message}
-    
     try:
-        response = requests.post(url, json=payload)
-        # 💡 這行非常重要，它會告訴我們 Telegram 的真實反應
-        if response.status_code == 200:
-            print("✅ Telegram 訊息發送成功！")
-        else:
-            print(f"❌ Telegram 發送失敗。狀態碼：{response.status_code}")
-            print(f"❌ 錯誤原因：{response.text}")
-    except Exception as e:
-        print(f"❌ 網路連線異常：{e}")
+        requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message})
+    except: pass
 
 def get_tw_time():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
 
+def update_ma60_cache(client, symbol):
+    """取得過去 60 天資料並計算季線"""
+    try:
+        # 抓取最近 100 天的日 K 線確保資料充足
+        end_date = get_tw_time().strftime("%Y-%m-%d")
+        res = client.stock.historical.candles(symbol=symbol, fields=['close'])
+        df = pd.DataFrame(res['data'])
+        if len(df) >= 60:
+            ma60 = df['close'].tail(60).mean()
+            return round(ma60, 2)
+    except Exception as e:
+        print(f"計算 {symbol} MA60 失敗: {e}")
+    return None
+
 def start_monitor():
     if not FUGLE_API_KEY:
-        print("❌ 錯誤：找不到 FUGLE_API_KEY。")
+        print("❌ 找不到 FUGLE_API_KEY")
         return
 
     client = RestClient(api_key=FUGLE_API_KEY)
     stock = client.stock
     
-    print(f"🚀 雲端監控啟動：{STOCK_SYMBOL}")
-    print(f"📢 目前設定目標價：{TARGET_PRICE} (低於此價會發通知)")
+    print(f"🚀 中長線波段監控啟動，監控數量：{len(WATCH_LIST)}")
+    send_telegram_msg(f"✅ 雲端交易員上線：監控清單共 {len(WATCH_LIST)} 檔標的")
 
     while True:
         now = get_tw_time()
         current_time_str = now.strftime("%H:%M")
 
-        # 自動下班邏輯 (測試時可以先把這段註解掉，或是確認現在時間)
-        if current_time_str > STOP_TIME:
-            print(f"🕒 現在 {current_time_str}，收盤休息。")
-            # 為了測試，我們先讓它印出最後一筆就結束
-            # break 
+        # 自動下班：13:35 結束
+        if current_time_str > "13:35":
+            print("🕒 已過收盤時間，程式下班。")
+            break
 
-        try:
-            res = stock.intraday.quote(symbol=STOCK_SYMBOL)
-            current_price = res.get('lastPrice')
-            
-            if current_price:
-                print(f"【{current_time_str}】即時價格: {current_price}")
-                
-                # 測試觸發條件
-                if current_price <= TARGET_PRICE:
-                    msg = f"🔔 股價警報！\n標的：{STOCK_SYMBOL}\n現價：{current_price}\n低於目標：{TARGET_PRICE}"
-                    send_telegram_msg(msg)
-                    # 為了避免洗板，發送後可以考慮 break 或增加間隔
-            
-        except Exception as e:
-            print(f"抓取資料失敗: {e}")
-        
+        # 盤中執行：09:00 - 13:35
+        if "09:00" <= current_time_str <= "13:35":
+            for symbol in WATCH_LIST:
+                try:
+                    # 1. 抓取即時報價
+                    res = stock.intraday.quote(symbol=symbol)
+                    price = res.get('lastPrice')
+                    name = res.get('name', symbol)
+                    if not price: continue
+
+                    # 2. 初始化或更新記憶體資料
+                    if symbol not in price_memory:
+                        ma60 = update_ma60_cache(client, symbol)
+                        price_memory[symbol] = {"high": price, "ma60": ma60}
+                    
+                    data = price_memory[symbol]
+                    
+                    # 更新最高價 (移動止盈用)
+                    if price > data["high"]:
+                        data["high"] = price
+
+                    # 3. 判斷策略 A：移動止盈 (從高點回落 10%)
+                    drop_from_high = (data["high"] - price) / data["high"]
+                    if drop_from_high >= TRAILING_STOP_PERCENT:
+                        alert = f"⚠️ 移動止盈警報！\n標的：{name}({symbol})\n現價：{price}\n近期高點：{data['high']}\n已回落：{drop_from_high:.1%}\n建議檢查趨勢是否轉弱。"
+                        send_telegram_msg(alert)
+                        # 防止洗板，發送後調高最高價門檻
+                        data["high"] = price * 1.5 
+
+                    # 4. 判斷策略 B：均線支撐 (靠近季線 2% 內)
+                    if data["ma60"]:
+                        dist_to_ma60 = (price - data["ma60"]) / data["ma60"]
+                        if 0 <= dist_to_ma60 <= MA_SUPPORT_GAP:
+                            alert = f"🛡️ 支撐點觀察中\n標的：{name}({symbol})\n現價：{price}\n季線(MA60)：{data['ma60']}\n目前僅高於季線 {dist_to_ma60:.1%}\n長線分批佈署機會點！"
+                            send_telegram_msg(alert)
+                            # 防止洗板，暫時清除 ma60 紀錄
+                            data["ma60"] = None 
+
+                    print(f"[{current_time_str}] {name:8}: {price:>8} | 距高點: -{drop_from_high:.1%}")
+                    time.sleep(1) # 每檔股票間隔 1 秒，避免 API 超載
+
+                except Exception as e:
+                    print(f"監控 {symbol} 時發生錯誤: {e}")
+
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
