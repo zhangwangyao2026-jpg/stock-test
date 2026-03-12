@@ -114,4 +114,4 @@ def start_monitor():
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    start_monitor()
+    start_monitor() # force update
