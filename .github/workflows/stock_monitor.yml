@@ -3,13 +3,14 @@ name: 台股即時監控自動化
 on:
   schedule:
     # 台灣時間週一至週五 08:55 啟動 (UTC 00:55)
-    # 提前 5 分鐘啟動，避開整點擁塞，確保開盤時已在執行
     - cron: '55 0 * * 1-5'
   workflow_dispatch: # 允許手動點擊 Run workflow
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 加上超時保護，避免超過 5 小時（台股盤中約 4.5 小時）
+    timeout-minutes: 300 
 
     steps:
       - name: 檢查程式碼
@@ -25,17 +26,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install fugle-marketdata requests pandas
 
-      - name: 檢查環境變數狀態
-        run: |
-          echo "正在驗證 Secrets 配置..."
-          if [ -z "${{ secrets.FUGLE_API_KEY }}" ]; then echo "錯誤: FUGLE_API_KEY 缺失"; exit 1; fi
-          if [ -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then echo "錯誤: TELEGRAM_BOT_TOKEN 缺失"; exit 1; fi
-          if [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then echo "錯誤: TELEGRAM_CHAT_ID 缺失"; exit 1; fi
-          echo "環境變數檢查正常。"
-
       - name: 執行監控程式
         env:
           FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 fugle_test.py
+        # 使用 python3 執行，並確保輸出能即時顯示在日誌中
+        run: python3 -u fugle_test.py
