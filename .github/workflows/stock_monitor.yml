@@ -2,8 +2,9 @@ name: 台股即時監控自動化
 
 on:
   schedule:
-    # 台灣時間週一至週五 09:00 啟動 (UTC 01:00)
-    - cron: '0 1 * * 1-5'
+    # 台灣時間週一至週五 08:55 啟動 (UTC 00:55)
+    # 提前 5 分鐘啟動，避開整點擁塞，確保開盤時已在執行
+    - cron: '55 0 * * 1-5'
   workflow_dispatch: # 允許手動點擊 Run workflow
 
 jobs:
@@ -12,22 +13,29 @@ jobs:
 
     steps:
       - name: 檢查程式碼
-        uses: actions/checkout@v4  # 升級至 v4 消除警告
+        uses: actions/checkout@v4
 
       - name: 設定 Python 環境
-        uses: actions/setup-python@v5 # 升級至 v5 消除警告
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: 安裝必要套件
         run: |
-          # 這裡新增了 pandas 用於策略計算
+          python -m pip install --upgrade pip
           pip install fugle-marketdata requests pandas
+
+      - name: 檢查環境變數狀態
+        run: |
+          echo "正在驗證 Secrets 配置..."
+          if [ -z "${{ secrets.FUGLE_API_KEY }}" ]; then echo "錯誤: FUGLE_API_KEY 缺失"; exit 1; fi
+          if [ -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then echo "錯誤: TELEGRAM_BOT_TOKEN 缺失"; exit 1; fi
+          if [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then echo "錯誤: TELEGRAM_CHAT_ID 缺失"; exit 1; fi
+          echo "環境變數檢查正常。"
 
       - name: 執行監控程式
         env:
-          # 這些是您在 GitHub Settings 裡設定的 Secrets
           FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 fugle_test.py 
+        run: python3 fugle_test.py
