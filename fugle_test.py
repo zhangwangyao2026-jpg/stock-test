@@ -17,12 +17,13 @@ WATCH_LIST = [
 
 TRAILING_STOP_PERCENT = 0.10  # 10% 移動止盈
 MA_SUPPORT_GAP = 0.02         # 2% 季線支撐
-CHECK_INTERVAL = 60           # 輪詢間隔
+CHECK_INTERVAL = 60           # 輪詢間隔 (秒)
 
 FUGLE_API_KEY = os.getenv("FUGLE_API_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# 記憶體：紀錄每檔股票的「近期最高價」與「MA60」
 price_memory = {}
 
 def send_telegram_msg(message):
@@ -36,17 +37,19 @@ def get_tw_time():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
 
 def update_ma60_cache(client, symbol):
-    """計算季線：補齊欄位並增加延遲"""
+    """計算季線：補齊必填欄位並增加延遲避開限制"""
     try:
-        time.sleep(1.2) # 避開 429 頻率限制
-        # 強制指定所有欄位，避開 400 錯誤
+        # 強制延遲 1.2 秒，確保每秒不超過一個請求，解決 429 錯誤
+        time.sleep(1.2) 
+        
+        # 修正點：補齊所有必填欄位，解決 400 錯誤與 None 顯示問題
         res = client.stock.historical.candles(
             symbol=symbol, 
             timeframe='D',
             fields=['open', 'high', 'low', 'close', 'volume', 'turnover', 'change']
         )
         if not res or 'data' not in res or not res['data']:
-            print(f"⚠️ {symbol} API 未回傳歷史數據")
+            print(f"⚠️ {symbol} 抓取歷史數據失敗")
             return None
             
         df = pd.DataFrame(res['data'])
@@ -65,27 +68,29 @@ def start_monitor():
         return
 
     client = RestClient(api_key=FUGLE_API_KEY)
-    send_telegram_msg("🚀 長線監控已全面修復\n(修正：API 欄位補齊 + 季線計算優化)")
+    send_telegram_msg("🚀 長線監控已修復啟動\n(修正：API 欄位與季線計算優化)")
 
     while True:
         now = get_tw_time()
         current_time_str = now.strftime("%H:%M")
 
+        # 13:35 結束當日監控
         if current_time_str > "13:35":
             send_telegram_msg("🔔 今日盤中監控結束。")
             break
 
+        # 盤中執行時間
         if "09:00" <= current_time_str <= "13:35":
             print(f"\n--- [掃描輪次 {current_time_str}] ---")
             for symbol in WATCH_LIST:
                 try:
-                    # 初始化該檔股票的數據
+                    # 1. 初始化該檔股票的數據 (MA60)
                     if symbol not in price_memory:
-                        print(f"正在初始化 {symbol}...")
+                        print(f"正在初始化 {symbol} 數據...")
                         ma60 = update_ma60_cache(client, symbol)
                         price_memory[symbol] = {"high": 0.0, "ma60": ma60, "alerted_ma": False}
                     
-                    # 取得即時報價
+                    # 2. 取得即時報價
                     time.sleep(0.3) 
                     res = client.stock.intraday.quote(symbol=symbol)
                     price = res.get('lastPrice')
@@ -95,18 +100,18 @@ def start_monitor():
                     
                     data = price_memory[symbol]
                     
-                    # 更新最高價
+                    # 3. 策略判斷：更新最高價
                     if price > data["high"]:
                         data["high"] = price
 
-                    # 策略：移動止盈
+                    # 策略 A：10% 移動止盈
                     if data["high"] > 0:
                         drop = (data["high"] - price) / data["high"]
                         if drop >= TRAILING_STOP_PERCENT:
                             send_telegram_msg(f"⚠️ 止盈告警: {name}({symbol})\n現價: {price}\n最高: {data['high']}\n回落: {drop:.1%}")
-                            data["high"] = price * 1.5 
+                            data["high"] = price * 1.5 # 調高門檻避免同一天洗板
 
-                    # 策略：季線支撐
+                    # 策略 B：2% 季線支撐
                     if data["ma60"] and not data["alerted_ma"]:
                         dist = (price - data["ma60"]) / data["ma60"]
                         if 0 <= dist <= MA_SUPPORT_GAP:
