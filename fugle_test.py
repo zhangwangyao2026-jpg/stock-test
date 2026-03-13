@@ -36,9 +36,10 @@ def get_tw_time():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
 
 def update_ma60_cache(client, symbol):
-    """取得資料並計算季線，加入延遲避開 429 錯誤"""
+    """取得資料並計算季線，加入延遲避開 429 頻率限制"""
     try:
-        time.sleep(1.1) # 強制延遲，確保每秒只發送一次請求
+        # 強制延遲 1.1 秒，確保不超過 API 每秒請求上限
+        time.sleep(1.1) 
         res = client.stock.historical.candles(symbol=symbol, timeframe='D')
         if not res or 'data' not in res or len(res['data']) == 0:
             return None
@@ -48,7 +49,7 @@ def update_ma60_cache(client, symbol):
             ma60 = df['close'].tail(60).mean()
             return round(ma60, 2)
     except Exception as e:
-        print(f"⚠️ {symbol} MA60 初始化失敗 (可能觸發限制): {e}")
+        print(f"⚠️ {symbol} MA60 初始化失敗: {e}")
     return None
 
 def start_monitor():
@@ -57,14 +58,14 @@ def start_monitor():
         return
 
     client = RestClient(api_key=FUGLE_API_KEY)
-    send_telegram_msg(f"✅ 雲端監控啟動\n(已加入限流保護，避免 API 429 錯誤)")
+    send_telegram_msg(f"✅ 長線監控啟動\n(已加入限流保護，避開 429 錯誤)")
 
     while True:
         now = get_tw_time()
         current_time_str = now.strftime("%H:%M")
 
         if current_time_str > "13:35":
-            send_telegram_msg("🔔 收盤時間，長線監控停止。")
+            send_telegram_msg("🔔 收盤時間到，監控停止。")
             break
 
         if "09:00" <= current_time_str <= "13:35":
@@ -73,12 +74,12 @@ def start_monitor():
                 try:
                     # 1. 檢查是否需要初始化 MA60
                     if symbol not in price_memory:
-                        print(f"正在初始化 {symbol}...")
+                        print(f"正在初始化 {symbol} 季線數據...")
                         ma60 = update_ma60_cache(client, symbol)
                         price_memory[symbol] = {"high": 0.0, "ma60": ma60, "alerted_ma": False}
                     
-                    # 2. 取得即時報價 (同樣加入小延遲)
-                    time.sleep(0.5) 
+                    # 2. 取得即時報價 (同樣小幅延遲保護)
+                    time.sleep(0.2) 
                     res = client.stock.intraday.quote(symbol=symbol)
                     price = res.get('lastPrice')
                     name = res.get('name', symbol)
@@ -87,29 +88,29 @@ def start_monitor():
                     
                     data = price_memory[symbol]
                     
-                    # 策略邏輯：移動止盈
+                    # 更新最高價與移動止盈邏輯
                     if price > data["high"]:
                         data["high"] = price
 
                     drop = (data["high"] - price) / data["high"] if data["high"] > 0 else 0
                     if drop >= TRAILING_STOP_PERCENT:
-                        send_telegram_msg(f"⚠️ 止盈告警: {name}({symbol})\n現價: {price}\n回落: {drop:.1%}")
-                        data["high"] = price * 1.5 
+                        send_telegram_msg(f"⚠️ 止盈告警: {name}({symbol})\n現價: {price}\n高點回落: {drop:.1%}")
+                        data["high"] = price * 1.5 # 暫時調高避免洗板
 
-                    # 策略邏輯：季線支撐
+                    # 季線支撐邏輯
                     if data["ma60"] and not data["alerted_ma"]:
                         dist = (price - data["ma60"]) / data["ma60"]
                         if 0 <= dist <= MA_SUPPORT_GAP:
-                            send_telegram_msg(f"🛡️ 支撐告警: {name}({symbol})\n現價: {price}\n季線: {data['ma60']}")
+                            send_telegram_msg(f"🛡️ 支撐告警: {name}({symbol})\n現價: {price}\n季線支撐: {data['ma60']}")
                             data["alerted_ma"] = True 
 
                     print(f"[{symbol}] 現價: {price:>7} | 季線: {str(data['ma60']):>7}")
 
                 except Exception as e:
-                    print(f"處理 {symbol} 異常: {e}")
+                    print(f"處理 {symbol} 時發生異常: {e}")
                     continue
         else:
-            print(f"非盤中時間 ({current_time_str})，等待中...")
+            print(f"非開盤時間 ({current_time_str})，靜候中...")
             time.sleep(300)
             continue
 
