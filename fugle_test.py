@@ -15,9 +15,9 @@ WATCH_LIST = [
     "2377", "2382", "6669", "3653", "4526"
 ]
 
-TRAILING_STOP_PERCENT = 0.10  # 10% 移動止盈 (回落止盈)
-MA_SUPPORT_GAP = 0.02         # 2% 季線支撐 (買入觀察區)
-CHECK_INTERVAL = 60           # 輪詢間隔 (秒)
+TRAILING_STOP_PERCENT = 0.10  # 10% 移動止盈
+MA_SUPPORT_GAP = 0.02          # 2% 季線支撐觀察區
+CHECK_INTERVAL = 60            # 輪詢間隔 (秒)
 
 FUGLE_API_KEY = os.getenv("FUGLE_API_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -35,22 +35,29 @@ def send_telegram_msg(message):
 def get_tw_time():
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
 
-def update_ma60_cache(client, symbol):
+def init_stock_data(client, symbol):
+    """初始化季線數據與基本資料"""
     try:
-        time.sleep(1.2) 
-        res = client.stock.historical.candles(
-            symbol=symbol, timeframe='D',
-            fields=['open', 'high', 'low', 'close', 'volume', 'turnover', 'change']
-        )
-        if not res or 'data' not in res: return None
+        time.sleep(1.0) 
+        res = client.stock.historical.candles(symbol=symbol, timeframe='D')
+        if not res or 'data' not in res or len(res['data']) == 0:
+            return None
+        
         df = pd.DataFrame(res['data'])
-        if not df.empty:
-            ma_period = min(len(df), 60)
-            ma_val = df['close'].tail(ma_period).mean()
-            return round(ma_val, 2)
+        ma60_val = df['close'].tail(60).mean()
+        
+        ticker = client.stock.intraday.ticker(symbol=symbol)
+        stock_name = ticker.get('name', symbol)
+        
+        return {
+            "current_max": 0.0, 
+            "ma60": round(ma60_val, 2), 
+            "alerted_ma": False,
+            "name": stock_name
+        }
     except Exception as e:
-        print(f"❌ {symbol} 季線計算異常: {e}")
-    return None
+        print(f"❌ {symbol} 初始化失敗: {e}")
+        return None
 
 def start_monitor():
     if not FUGLE_API_KEY:
@@ -58,71 +65,65 @@ def start_monitor():
         return
 
     client = RestClient(api_key=FUGLE_API_KEY)
-    send_telegram_msg("🚀 長線波段監控啟動\n(已整合建議買價與移動止盈點)")
+    send_telegram_msg("🚀 長線波段監控啟動 (sen-stock-test)")
 
     while True:
         now = get_tw_time()
         current_time_str = now.strftime("%H:%M")
 
         if current_time_str > "13:35":
-            send_telegram_msg("🔔 今日台股已收盤，自動監控結束。")
+            send_telegram_msg("🔔 長線波段監控今日台股監控結束。")
             break
 
         if "09:00" <= current_time_str <= "13:35":
-            print(f"\n--- [掃描輪次 {current_time_str}] ---")
             for symbol in WATCH_LIST:
                 try:
                     if symbol not in price_memory:
-                        ma60 = update_ma60_cache(client, symbol)
-                        price_memory[symbol] = {"high": 0.0, "ma60": ma60, "alerted_ma": False}
+                        data = init_stock_data(client, symbol)
+                        if data: price_memory[symbol] = data
+                        else: continue
                     
-                    time.sleep(0.3) 
-                    res = client.stock.intraday.quote(symbol=symbol)
-                    price = res.get('lastPrice')
-                    name = res.get('name', symbol)
-                    change_pct = res.get('changePercent', 0)
+                    quote = client.stock.intraday.quote(symbol=symbol)
+                    price = quote.get('lastPrice')
+                    chg_pct = quote.get('changePercent', 0)
                     
                     if not price: continue
-                    data = price_memory[symbol]
                     
-                    if price > data["high"]:
-                        data["high"] = price
+                    stock_data = price_memory[symbol]
+                    
+                    # 更新波段最高價
+                    if price > stock_data["current_max"]:
+                        stock_data["current_max"] = price
 
-                    # 策略 A：移動止盈告警 (最高點回落)
-                    if data["high"] > 0:
-                        drop = (data["high"] - price) / data["high"]
-                        if drop >= TRAILING_STOP_PERCENT:
+                    # 策略 A：移動止盈
+                    if stock_data["current_max"] > 0:
+                        drop_ratio = (stock_data["current_max"] - price) / stock_data["current_max"]
+                        if drop_ratio >= TRAILING_STOP_PERCENT:
                             msg = (f"⚠️ 止盈告警！\n"
-                                   f"標的：{symbol} {name}\n"
-                                   f"現價：{price} ({change_pct:+.2f}%)\n"
-                                   f"最高價：{data['high']}\n"
-                                   f"觸發止盈：{price} (回落 {drop:.1%})\n"
-                                   f"建議出場：分批減碼或全數獲利")
+                                   f"標的：{symbol} {stock_data['name']}\n"
+                                   f"現價：{price} ({chg_pct:+.2f}%)\n"
+                                   f"最高價：{stock_data['current_max']}\n"
+                                   f"觸發條件：回落 {drop_ratio:.1%}")
                             send_telegram_msg(msg)
-                            data["high"] = price * 1.5 
+                            stock_data["current_max"] = price * 2 
 
-                    # 策略 B：季線支撐告警 (建議買入區)
-                    if data["ma60"] and not data["alerted_ma"]:
-                        dist = (price - data["ma60"]) / data["ma60"]
+                    # 策略 B：季線支撐
+                    if stock_data["ma60"] > 0 and not stock_data["alerted_ma"]:
+                        dist = (price - stock_data["ma60"]) / stock_data["ma60"]
                         if 0 <= dist <= MA_SUPPORT_GAP:
-                            # 建議止損設在季線下方 2%
-                            stop_loss = round(data["ma60"] * 0.98, 2)
+                            stop_loss = round(stock_data["ma60"] * 0.98, 2)
                             msg = (f"🛡️ 支撐買點觀察！\n"
-                                   f"標的：{symbol} {name}\n"
-                                   f"現價：{price} ({change_pct:+.2f}%)\n"
-                                   f"建議買位：{price} (接近季線 {data['ma60']})\n"
+                                   f"標的：{symbol} {stock_data['name']}\n"
+                                   f"現價：{price} (接近季線 {stock_data['ma60']})\n"
                                    f"建議停損：{stop_loss} (季線 -2%)\n"
-                                   f"距離支撐：{dist:.2%}")
+                                   f"距離：{dist:.2%}")
                             send_telegram_msg(msg)
-                            data["alerted_ma"] = True 
+                            stock_data["alerted_ma"] = True 
 
-                    print(f"[{symbol} {name[:2]}] 現價: {price:>7} | 季線: {str(data['ma60']):>7}")
-
-                except Exception as e:
+                    time.sleep(0.2)
+                except:
                     continue
-        else:
-            time.sleep(600)
-            
+        
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":

@@ -1,17 +1,15 @@
-name: 台股即時監控自動化
+name: 長線波段監控
 
 on:
   schedule:
-    # 台灣時間週一至週五 08:55 啟動 (UTC 00:55)
-    - cron: '55 0 * * 1-5'
-  workflow_dispatch: # 允許手動點擊 Run workflow
+    # 台灣時間 08:50 啟動 (UTC 00:50)
+    - cron: '50 0 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 加上超時保護，避免超過 5 小時（台股盤中約 4.5 小時）
     timeout-minutes: 300 
-
     steps:
       - name: 檢查程式碼
         uses: actions/checkout@v4
@@ -20,16 +18,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          # 已移除 cache: 'pip' 避免報錯
 
       - name: 安裝必要套件
         run: |
           python -m pip install --upgrade pip
-          pip install fugle-marketdata requests pandas
+          pip install pandas fugle-marketdata requests
 
       - name: 執行監控程式
         env:
           FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        # 使用 python3 執行，並確保輸出能即時顯示在日誌中
         run: python3 -u fugle_test.py
